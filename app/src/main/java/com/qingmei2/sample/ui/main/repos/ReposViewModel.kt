@@ -1,83 +1,76 @@
 package com.qingmei2.sample.ui.main.repos
 
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProviders
-import androidx.paging.PagedList
 import com.qingmei2.rhine.base.viewmodel.BaseViewModel
-import com.qingmei2.rhine.ext.livedata.toReactiveStream
+import com.qingmei2.rhine.ext.reactivex.copyMap
 import com.qingmei2.rhine.util.RxSchedulers
 import com.qingmei2.rhine.util.SingletonHolderSingleArg
 import com.qingmei2.sample.base.Result
-import com.qingmei2.sample.entity.Repo
 import com.uber.autodispose.autoDisposable
 import io.reactivex.Completable
+import io.reactivex.Observable
+import io.reactivex.subjects.BehaviorSubject
 
 @SuppressWarnings("checkResult")
 class ReposViewModel(
         private val repo: ReposRepository
 ) : BaseViewModel() {
 
-    private val events: MutableLiveData<List<Repo>> = MutableLiveData()
-
-    val sort: MutableLiveData<String> = MutableLiveData()
-
-    val refreshing: MutableLiveData<Boolean> = MutableLiveData()
-
-    val error: MutableLiveData<Throwable> = MutableLiveData()
-
-    val pagedList = MutableLiveData<PagedList<Repo>>()
+    private val mViewStateSubject: BehaviorSubject<ReposViewState> =
+            BehaviorSubject.createDefault(ReposViewState.initial())
 
     init {
-        refreshing.toReactiveStream()
+        observeViewState()
+                .map { it.isLoading }
                 .distinctUntilChanged()
                 .filter { it }
-                .autoDisposable(this)
-                .subscribe { refreshDataSource() }
-
-        // try auto refreshing page list when sort has changed
-        sort.toReactiveStream()
-                .startWith(sortByUpdate)
-                .distinctUntilChanged()
-                .doOnNext { refreshing.postValue(true) }
+                .flatMapCompletable { refreshDataSource() }
                 .autoDisposable(this)
                 .subscribe()
 
-        // only subscribe once in fragment scope
         repo.subscribeRemoteRequestState()
                 .observeOn(RxSchedulers.ui)
-                .doOnNext { result ->
+                .autoDisposable(this)
+                .subscribe { result ->
                     when (result) {
-                        is Result.Loading -> applyState()
-                        is Result.Idle -> applyState()
-                        is Result.Failure -> {
-                            applyState(error = result.error)
-                            refreshing.postValue(false)
+                        is Result.Failure -> mViewStateSubject.copyMap { state ->
+                            state.copy(isLoading = false, throwable = result.error, pagedList = null, nextPageData = null)
                         }
-                        is Result.Success -> {
-                            refreshing.postValue(false)
+                        is Result.Success -> mViewStateSubject.copyMap { state ->
+                            state.copy(isLoading = false, throwable = null, pagedList = null, nextPageData = result.data)
                         }
                     }
                 }
-                .autoDisposable(this)
-                .subscribe()
 
-        fetchPagedListFromDbCompletable()
-                .autoDisposable(this)
-                .subscribe()
-    }
-
-    private fun fetchPagedListFromDbCompletable(): Completable {
-        return repo.fetchPagedListFromDb(sort.value ?: sortByUpdate)
+        repo.fetchPagedListFromDb { mViewStateSubject.value!!.sort }
                 .subscribeOn(RxSchedulers.io)
-                .doOnNext { pagedList.postValue(it) }
-                .ignoreElements()
+                .toObservable()
+                .autoDisposable(this)
+                .subscribe { pagedList ->
+                    mViewStateSubject.copyMap { state ->
+                        state.copy(isLoading = false, throwable = null, pagedList = pagedList, nextPageData = null)
+                    }
+                }
     }
 
-    fun refreshDataSource() {
-        repo.refreshDataSource(sort.value ?: sortByUpdate)
+    fun onSortChanged(sort: String) {
+        if (sort != mViewStateSubject.value!!.sort)
+            mViewStateSubject.copyMap { state ->
+                state.copy(isLoading = true, throwable = null, pagedList = null, nextPageData = null, sort = sort)
+            }
+    }
+
+    fun observeViewState(): Observable<ReposViewState> {
+        return mViewStateSubject.hide().distinctUntilChanged()
+    }
+
+    fun refreshDataSource(): Completable {
+        return Completable.fromCallable {
+            repo.refreshDataSource(mViewStateSubject.value!!.sort)
+        }.subscribeOn(RxSchedulers.io)
     }
 
     override fun onCleared() {
@@ -85,12 +78,6 @@ class ReposViewModel(
 
         repo.mAutoDisposeObserver.onNext(Unit)
         repo.mAutoDisposeObserver.onComplete()
-    }
-
-    private fun applyState(events: List<Repo>? = null,
-                           error: Throwable? = null) {
-        this.error.postValue(error)
-        this.events.postValue(events)
     }
 
     companion object {

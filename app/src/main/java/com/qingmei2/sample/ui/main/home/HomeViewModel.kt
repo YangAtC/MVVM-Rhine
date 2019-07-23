@@ -1,36 +1,33 @@
 package com.qingmei2.sample.ui.main.home
 
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProviders
 import androidx.paging.PagedList
-import arrow.core.Option
-import arrow.core.none
-import arrow.core.some
 import com.qingmei2.rhine.base.viewmodel.BaseViewModel
-import com.qingmei2.rhine.ext.livedata.toReactiveStream
-import com.qingmei2.rhine.util.RxSchedulers
+import com.qingmei2.rhine.ext.reactivex.copyMap
 import com.qingmei2.rhine.util.SingletonHolderSingleArg
 import com.qingmei2.sample.base.Result
 import com.qingmei2.sample.entity.ReceivedEvent
 import com.uber.autodispose.autoDisposable
-import io.reactivex.Completable
+import io.reactivex.Observable
+import io.reactivex.subjects.BehaviorSubject
 
 @SuppressWarnings("checkResult")
 class HomeViewModel(
         private val repo: HomeRepository
 ) : BaseViewModel() {
 
-    val pagedList = MutableLiveData<PagedList<ReceivedEvent>>()
+    val pagedListEventSubject = BehaviorSubject.create<PagedList<ReceivedEvent>>()
+    val refreshStateChangedEventSubject = BehaviorSubject.create<Boolean>()
+    private val mErrorEventSubject = BehaviorSubject.create<Throwable>()
 
-    val refreshing: MutableLiveData<Boolean> = MutableLiveData()
-
-    private val error: MutableLiveData<Option<Throwable>> = MutableLiveData()
+    private val mHomeViewStateSubject: BehaviorSubject<HomeViewState> =
+            BehaviorSubject.createDefault(HomeViewState.initial())
 
     init {
-        refreshing.toReactiveStream()
+        refreshStateChangedEventSubject
                 .distinctUntilChanged()
                 .filter { it }
                 .autoDisposable(this)
@@ -38,40 +35,41 @@ class HomeViewModel(
 
         // only subscribe once in fragment scope
         repo.subscribeRemoteRequestState()
-                .observeOn(RxSchedulers.ui)
-                .doOnNext { result ->
+                .autoDisposable(this)
+                .subscribe { result ->
                     when (result) {
-                        is Result.Loading -> applyState()
-                        is Result.Idle -> applyState()
-                        is Result.Failure -> {
-                            applyState(error = result.error.some())
-                            refreshing.postValue(false)
+                        is Result.Loading -> mHomeViewStateSubject.copyMap { viewState ->
+                            viewState.copy(isLoading = true, throwable = null)
                         }
-                        is Result.Success -> {
-                            refreshing.postValue(false)
+                        is Result.Idle -> mHomeViewStateSubject.copyMap { viewState ->
+                            viewState.copy(isLoading = false, throwable = null)
                         }
+                        is Result.Failure ->
+                            mHomeViewStateSubject.copyMap { viewState ->
+                                viewState.copy(isLoading = false, throwable = result.error)
+                            }
+                        is Result.Success ->
+                            mHomeViewStateSubject.copyMap { viewState ->
+                                viewState.copy(isLoading = false, throwable = null)
+                            }
                     }
                 }
-                .autoDisposable(this)
-                .subscribe()
 
-        fetchPagedListFromDbCompletable()
+        repo.initPagedListFromDb()
                 .autoDisposable(this)
-                .subscribe()
+                .subscribe { pagedList ->
+                    mHomeViewStateSubject.copyMap { state ->
+                        state.copy(isLoading = false, throwable = null, pagedList = pagedList)
+                    }
+                }
+    }
+
+    fun observeViewState(): Observable<HomeViewState> {
+        return mHomeViewStateSubject.hide().distinctUntilChanged()
     }
 
     fun refreshDataSource() {
         repo.refreshPagedList()
-    }
-
-    private fun fetchPagedListFromDbCompletable(): Completable {
-        return repo.initPagedListFromDb()
-                .doOnNext { pagedList.postValue(it) }
-                .ignoreElements()
-    }
-
-    private fun applyState(error: Option<Throwable> = none()) {
-        this.error.postValue(error)
     }
 
     override fun onCleared() {

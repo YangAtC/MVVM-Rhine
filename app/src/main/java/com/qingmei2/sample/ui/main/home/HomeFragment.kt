@@ -7,11 +7,12 @@ import com.jakewharton.rxbinding3.recyclerview.scrollStateChanges
 import com.jakewharton.rxbinding3.swiperefreshlayout.refreshes
 import com.qingmei2.rhine.base.view.fragment.BaseFragment
 import com.qingmei2.rhine.ext.jumpBrowser
-import com.qingmei2.rhine.ext.livedata.toReactiveStream
 import com.qingmei2.rhine.ext.reactivex.clicksThrottleFirst
+import com.qingmei2.rhine.util.RxSchedulers
 import com.qingmei2.sample.R
 import com.qingmei2.sample.base.BaseApplication
 import com.qingmei2.sample.common.listScrollChangeStateProcessor
+import com.qingmei2.sample.utils.toast
 import com.uber.autodispose.autoDisposable
 import kotlinx.android.synthetic.main.fragment_home.*
 import org.kodein.di.Kodein
@@ -39,39 +40,47 @@ class HomeFragment : BaseFragment() {
     }
 
     private fun binds() {
-        // 列表滑动，底部按钮动态显示/隐藏
+        // when list scrolling start or stop, then switch bottom button visible state.
         mRecyclerView.scrollStateChanges()
                 .debounce(500, TimeUnit.MILLISECONDS)
                 .compose(listScrollChangeStateProcessor)
                 .autoDisposable(scopeProvider)
                 .subscribe(::switchFabState)
 
-        // 点击底部按钮，回到列表顶部
+        // when button was clicked, scrolling list to top.
         fabTop.clicksThrottleFirst()
                 .map { 0 }
                 .autoDisposable(scopeProvider)
                 .subscribe(mRecyclerView::scrollToPosition)
 
-        // 下拉刷新
+        // swipe refresh event.
         mSwipeRefreshLayout.refreshes()
                 .autoDisposable(scopeProvider)
                 .subscribe { mViewModel.refreshDataSource() }
 
-        // 刷新状态恢复
-        mViewModel.refreshing.toReactiveStream()
-                .filter { it != mSwipeRefreshLayout.isRefreshing }
-                .autoDisposable(scopeProvider)
-                .subscribe { mSwipeRefreshLayout.isRefreshing = it }
-
-        // 每当数据源更新，更新列表
-        mViewModel.pagedList.toReactiveStream()
-                .autoDisposable(scopeProvider)
-                .subscribe(mAdapter::submitList)
-
-        // 列表点击事件
+        // list item clicked event.
         mAdapter.getItemClickEvent()
                 .autoDisposable(scopeProvider)
                 .subscribe(BaseApplication.INSTANCE::jumpBrowser)
+
+        mViewModel.observeViewState()
+                .observeOn(RxSchedulers.ui)
+                .autoDisposable(scopeProvider)
+                .subscribe(this::onStateArrived)
+    }
+
+    private fun onStateArrived(state: HomeViewState) {
+        if (state.throwable != null) {
+            toast { state.throwable.message ?: "network error." }
+        }
+
+        if (state.pagedList != null) {
+            mAdapter.submitList(state.pagedList)
+        }
+
+        if (state.isLoading != mSwipeRefreshLayout.isRefreshing) {
+            mSwipeRefreshLayout.isRefreshing = state.isLoading
+        }
     }
 
     private fun switchFabState(show: Boolean) {
